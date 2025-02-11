@@ -2,11 +2,91 @@ const socket = io();
 const roomId = "default-room"; // Static room for now
 let localStream;
 const peers = {};
+let meetingStartTime;
+let timerInterval;
+let recognition;
+let recognizing = false;
+let fullText = ""; // Stores the complete transcript
+let captionTimeout;
 
 async function startMeeting() {
+    meetingStartTime = new Date();
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     document.getElementById("local-video").srcObject = localStream;
     socket.emit("join-room", roomId);
+
+    // Start the timer
+    timerInterval = setInterval(updateMeetingTimer, 1000);
+
+    // Initialize speech recognition
+    if ("webkitSpeechRecognition" in window) {
+        recognition = new webkitSpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.lang = "en-US";
+
+        recognition.onstart = () => {
+            recognizing = true;
+            document.getElementById("toggle-speech").innerHTML = '<i class="fas fa-microphone-alt-slash"></i><span>Stop Speech Recognition</span>';
+        };
+
+        recognition.onend = () => {
+            recognizing = false;
+            document.getElementById("toggle-speech").innerHTML = '<i class="fas fa-microphone-alt"></i><span>Start Speech Recognition</span>';
+        };
+
+        recognition.onresult = (event) => {
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    const transcript = event.results[i][0].transcript;
+                    fullText += transcript + " ";
+                    document.getElementById("transcript").innerText = fullText;
+                    showCaption(transcript);
+                }
+            }
+        };
+
+        recognition.onerror = (event) => {
+            console.error("Speech recognition error:", event);
+        };
+    } else {
+        alert("Speech recognition not supported in this browser.");
+    }
+}
+
+function showCaption(text) {
+    const captionElement = document.getElementById("caption");
+    if (!captionElement) {
+        console.error("Caption element not found!");
+        return;
+    }
+
+    captionElement.innerText = text;
+    captionElement.style.display = "block";
+    captionElement.style.opacity = "1";  
+    captionElement.style.visibility = "visible"; 
+
+    clearTimeout(captionTimeout);
+    captionTimeout = setTimeout(() => {
+        captionElement.style.opacity = "0";  
+        captionElement.style.visibility = "hidden";  
+        setTimeout(() => {
+            captionElement.style.display = "none";
+            captionElement.style.opacity = "1";  
+            captionElement.style.visibility = "visible";  
+        }, 500);  
+    }, 5000);
+}
+
+function updateMeetingTimer() {
+    const now = new Date();
+    const elapsedTime = Math.floor((now - meetingStartTime) / 1000); // Duration in seconds
+    const hours = Math.floor(elapsedTime / 3600);
+    const minutes = Math.floor((elapsedTime % 3600) / 60);
+    const seconds = elapsedTime % 60;
+
+    document.getElementById("meeting-timer").textContent = 
+        `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
 function toggleAudio() {
@@ -17,8 +97,6 @@ function toggleAudio() {
         ? '<i class="fas fa-microphone"></i><span>Mute</span>'
         : '<i class="fas fa-microphone-slash"></i><span>Unmute</span>';
 }
-
-// let localStream;
 
 async function toggleVideo() {
     const videoButton = document.getElementById("toggle-video");
@@ -60,11 +138,74 @@ async function toggleVideo() {
     }
 }
 
+async function shareScreen() {
+    try {
+        // Get the screen-sharing stream
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const screenTrack = screenStream.getVideoTracks()[0];
 
+        // Update local video preview
+        document.getElementById("local-video").srcObject = screenStream;
 
+        // Find and replace the video track in all peer connections
+        Object.values(peers).forEach(peer => {
+            const videoSender = peer.getSenders().find(sender => sender.track?.kind === 'video');
+            if (videoSender) {
+                videoSender.replaceTrack(screenTrack);
+            }
+        });
+
+        // Handle screen-sharing stop event
+        screenTrack.onended = async () => {
+            try {
+                const newStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                const newVideoTrack = newStream.getVideoTracks()[0];
+
+                // Restore local video preview
+                document.getElementById("local-video").srcObject = newStream;
+
+                // Replace the screen track with the camera video track in peer connections
+                Object.values(peers).forEach(peer => {
+                    const videoSender = peer.getSenders().find(sender => sender.track?.kind === 'video');
+                    if (videoSender) {
+                        videoSender.replaceTrack(newVideoTrack);
+                    }
+                });
+            } catch (error) {
+                console.error("Error restoring camera:", error);
+                alert("Unable to restore camera. Please check your settings.");
+            }
+        };
+    } catch (error) {
+        console.error("Error sharing screen:", error);
+        alert("Unable to share screen. Please check your settings.");
+    }
+}
+
+function toggleSpeechRecognition() {
+    if (recognizing) {
+        recognition.stop();
+    } else {
+        recognition.start();
+    }
+}
+
+function endMeeting() {
+    const meetingEndTime = new Date();
+    const meetingDuration = Math.floor((meetingEndTime - meetingStartTime) / 1000); // Duration in seconds
+    const minutes = Math.floor(meetingDuration / 60);
+    const seconds = meetingDuration % 60;
+
+    alert(`Meeting ended. Duration: ${minutes} minutes and ${seconds} seconds.`);
+    clearInterval(timerInterval); // Stop the timer
+    window.location.href = 'index.html';
+}
 
 document.getElementById("toggle-audio").addEventListener("click", toggleAudio);
 document.getElementById("toggle-video").addEventListener("click", toggleVideo);
+document.getElementById("share-screen").addEventListener("click", shareScreen);
+document.getElementById("end-meeting").addEventListener("click", endMeeting);
+document.getElementById("toggle-speech").addEventListener("click", toggleSpeechRecognition);
 
 socket.on("user-joined", (peerId) => {
     const peerConnection = new RTCPeerConnection();
